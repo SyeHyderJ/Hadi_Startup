@@ -1,0 +1,3 @@
+[submodule "urdu_OCR"]
+	path = urdu_OCR
+	url = https://github.com/SyeHyderJ/urdu-ocr.git
