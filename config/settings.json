@@ -1,0 +1,17 @@
+{
+  "llm_provider": "ollama",
+  "llm_url": "http://localhost:11434",
+  "llm_model": "llama3.2",
+  "tts_engine": "pyttsx3",
+  "tts_voice": "test-voice",
+  "tts_speed": 1.0,
+  "elevenlabs_api_key": "",
+  "elevenlabs_voice_id": "pNInz6obpgDQGcFmaJgB",
+  "kokoro_voice": "af_heart",
+  "kokoro_speed": 1.0,
+  "stt_engine": "speech_recognition",
+  "whisper_model": "base",
+  "vosk_model": "en-us",
+  "memory_encryption_enabled": true,
+  "memory_max_chars": 2200
+}

@@ -1,13 +1,16 @@
 """
 Enhanced LLM client for the AI Assistant.
 Supports multiple backends (Ollama, OpenAI-compatible) with streaming capabilities.
+Now supports image input for multimodal models.
 """
 import json
 import re
 import time
 from typing import Callable, Generator, List, Optional, Dict, Any
 from pathlib import Path
+
 import sys
+import base64
 
 import requests
 
@@ -17,11 +20,13 @@ from enhanced_assistant.config_manager import get_config, get_llm_provider, get_
 
 _SENT_END = re.compile(r'(?<=[.!?])\s+|(?<=\n)\s*\n')
 
+
 def get_llm_provider() -> str:
     """Returns 'ollama' or 'openai' (covers LM Studio, LocalAI, Jan, etc.)."""
     config = get_config()
     raw = config.get("llm_provider", "ollama").strip().lower()
     return "openai" if raw in ("openai", "lmstudio", "localai", "jan", "llamacpp") else "ollama"
+
 
 def get_llm_settings() -> tuple[str, str]:
     """Returns (base_url, model_name)."""
@@ -29,6 +34,54 @@ def get_llm_settings() -> tuple[str, str]:
     url = config.get("llm_url", "http://localhost:11434").rstrip("/")
     model = config.get("llm_model", "llama3.2")
     return url, model
+
+
+def _format_message_for_provider(message: Dict[str, Any], provider: str) -> Dict[str, Any]:
+    """
+    Convert a message to the format expected by the LLM provider.
+    Handles text-only messages and messages with images.
+    """
+    # Make a copy to avoid modifying the original
+    msg = message.copy()
+
+    # If there are no images, return the message as is (for text-only)
+    if "images" not in msg or not msg["images"]:
+        return msg
+
+    images = msg.pop("images")  # Remove and get the list of base64 strings
+    content = msg.get("content", "")
+
+    if provider == "ollama":
+        # For Ollama, we keep the content as a string and add the images list
+        # The Ollama API expects: {"role": "...", "content": "...", "images": ["base64", ...]}
+        msg["images"] = images
+        # Note: The content string can be empty or contain text; the model will use both.
+        return msg
+    elif provider == "openai":
+        # For OpenAI, we need to convert the content into a list of content parts
+        # If there's text, we add a text object; for each image, we add an image_url object
+        content_parts = []
+        if content:
+            content_parts.append({"type": "text", "text": content})
+        for img in images:
+            # Assume the image is base64 encoded; we'll use the data URL format
+            # We don't know the image type, so we'll use a generic prefix; the model might infer it.
+            # Alternatively, we could require the caller to specify the type, but for simplicity,
+            # we'll use "image/jpeg" as a common default. The user should ensure the image is JPEG.
+            # A better approach would be to have the caller provide the full data URL, but we'll
+            # keep it simple and assume JPEG.
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64:{img}"
+                }
+            })
+        msg["content"] = content_parts
+        return msg
+    else:
+        # Fallback: return the message as is (might break, but we don't know other providers)
+        return msg
+
 
 def ensure_ollama_running(timeout: int = 15) -> bool:
     """
@@ -93,6 +146,7 @@ def ensure_ollama_running(timeout: int = 15) -> bool:
     print("[LLM] Ollama did not respond within the timeout.")
     return False
 
+
 def warmup_model(system_prompt: Optional[str] = None) -> bool:
     """
     Pre-load the model and prime Ollama's KV prefix cache.
@@ -141,6 +195,7 @@ def warmup_model(system_prompt: Optional[str] = None) -> bool:
         print(f"[LLM] Warmup failed (non-fatal): {e}")
         return False
 
+
 def check_model_available(log_callback: Optional[Callable[[str], None]] = None) -> bool:
     """
     Check if the configured model is available.
@@ -164,25 +219,23 @@ def check_model_available(log_callback: Optional[Callable[[str], None]] = None) 
         model_base = model.split(":")[0]
 
         # Check if model is available (exact match, base name, or with tag)
-        found = any(
-            m == model or m == model_base or m.startswith(model_base + ":")
-            for m in pulled_models
-        )
+        found = False
+        for pulled in pulled_models:
+            if pulled == model or pulled.startswith(model_base + ":"):
+                found = True
+                break
 
-        if not found:
-            available = ", ".join(pulled_models) if pulled_models else "none"
-            warning_msg = (
-                f"WARNING: Model '{model}' is not pulled in Ollama.\n"
-                f"         Available: {available}\n"
-                f"         Fix: ollama pull {model}"
+        if not found and log_callback:
+            log_callback(
+                f"WARN: Model '{model}' not found in Ollama. "
+                f"Available: {', '.join(pulled_models[:5])}{'...' if len(pulled_models) > 5 else ''}"
             )
-            print(warning_msg)
-            if log_callback:
-                log_callback(f"WARNING: '{model}' not found — run: ollama pull {model}")
         return found
-    except Exception:
-        # Ollama might still be starting up; don't block on this
-        return True
+    except Exception as e:
+        if log_callback:
+            log_callback(f"WARN: Could not check model availability: {e}")
+        return True  # Fail open to avoid blocking
+
 
 def call_llm(
     messages: List[Dict[str, Any]],
@@ -191,98 +244,90 @@ def call_llm(
 ) -> Dict[str, Any]:
     """
     Non-streaming chat request. Routes to Ollama or OpenAI-compatible backend.
-
-    Args:
-        messages: List of message dictionaries
-        tools: Optional list of tool definitions
-        timeout: Request timeout in seconds
+    Now supports image input via the "images" key in message dictionaries.
 
     Returns:
-        Dictionary with "content" (str) and "tool_calls" (list)
+        {"content": str, "tool_calls": list}
     """
     url, model = get_llm_settings()
     provider = get_llm_provider()
+
+    # Format messages for the specific provider (handle images)
+    formatted_messages = [_format_message_for_provider(msg, provider) for msg in messages]
 
     if provider == "openai":
         endpoint = f"{url}/v1/chat/completions"
         payload: Dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": formatted_messages,
             "stream": False,
-            "max_tokens": 150,
         }
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-
         try:
-            response = requests.post(endpoint, json=payload, timeout=timeout)
-            response.raise_for_status()
-            result = response.json()
-            choice = result.get("choices", [{}])[0]
-            message = choice.get("message", {})
-
-            # Normalize OpenAI tool_calls format to match Ollama's format
-            raw_tool_calls = message.get("tool_calls") or []
-            tool_calls = []
-            for tc in raw_tool_calls:
-                function_data = tc.get("function", {})
-                arguments = function_data.get("arguments", {})
-                if isinstance(arguments, str):
-                    try:
-                        arguments = json.loads(arguments)
-                    except json.JSONDecodeError:
-                        pass  # Keep as string if not valid JSON
-
-                tool_calls.append({
-                    "id": tc.get("id", ""),
+            resp = requests.post(endpoint, json=payload, timeout=timeout)
+            resp.raise_for_status()
+            choice = resp.json().get("choices", [{}])[0]
+            msg = choice.get("message", {})
+            # OpenAI tool_calls format -> normalise to Ollama-style
+            raw_tc = msg.get("tool_calls") or []
+            tc_list = [
+                {
+                    "id": t.get("id", ""),
                     "function": {
-                        "name": function_data.get("name", ""),
-                        "arguments": arguments,
+                        "name": t["function"]["name"],
+                        "arguments": (
+                            json.loads(t["function"]["arguments"])
+                            if isinstance(t["function"].get("arguments"), str)
+                            else t["function"].get("arguments", {})
+                        ),
                     },
-                })
-
+                }
+                for t in raw_tc
+            ]
             return {
-                "content": (message.get("content") or "").strip(),
-                "tool_calls": tool_calls,
+                "content": (msg.get("content") or "").strip(),
+                "tool_calls": tc_list,
             }
         except Exception as e:
             raise RuntimeError(f"OpenAI-compatible LLM call failed: {e}")
 
-    # Ollama backend
+    # Ollama
     endpoint = f"{url}/api/chat"
     payload = {
         "model": model,
-        "messages": messages,
+        "messages": formatted_messages,
         "stream": False,
         "keep_alive": -1,
         "options": {"num_predict": 150, "num_gpu": 99},
     }
     if tools:
+        # Ollama tool format: we assume the tools are already in Ollama format
+        # (the same as OpenAI format? Actually, Ollama uses the same format as OpenAI for tools)
+        # We'll pass them as is.
         payload["tools"] = tools
 
     try:
-        response = requests.post(endpoint, json=payload, timeout=timeout)
-        response.raise_for_status()
-        data = response.json()
-        message = data.get("message", {})
-
+        resp = requests.post(endpoint, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        msg = data.get("message", {})
         return {
-            "content": (message.get("content") or "").strip(),
-            "tool_calls": message.get("tool_calls") or [],
+            "content": (msg.get("content") or "").strip(),
+            "tool_calls": msg.get("tool_calls") or [],
         }
     except requests.exceptions.ConnectionError as e:
         print(f"[LLM] ConnectionError — trying to restart Ollama… ({e})")
         if ensure_ollama_running():
             try:
-                response = requests.post(endpoint, json=payload, timeout=timeout)
-                response.raise_for_status()
-                data = response.json()
-                message = data.get("message", {})
-
+                resp = requests.post(endpoint, json=payload, timeout=timeout)
+                resp.force_for_status()
+                data = resp.json()
+                msg = data.get("message", {})
                 return {
-                    "content": (message.get("content") or "").strip(),
-                    "tool_calls": message.get("tool_calls") or [],
+                    "content": (msg.get("content") or "").strip(),
+                    "tool_calls": msg.get("tool_calls") or [],
                 }
             except Exception:
                 pass
@@ -299,6 +344,7 @@ def call_llm(
         print(f"[LLM] Unexpected error: {type(e).__name__}: {e}")
         raise RuntimeError(f"LLM call failed: {e}")
 
+
 def call_llm_text(
     prompt: str,
     system: Optional[str] = None,
@@ -306,45 +352,34 @@ def call_llm_text(
     timeout: int = 120,
 ) -> str:
     """
-    Simple text-only generation (no tools).
+    Simple text-only generation (no tools, no images).
     Used by planner, executor, error_handler, etc.
-
-    Args:
-        prompt: User prompt
-        system: Optional system prompt
-        model: Optional model name (uses config default if not provided)
-        timeout: Request timeout in seconds
-
-    Returns:
-        Generated text response
     """
     url, default_model = get_llm_settings()
-    model_name = model or default_model
+    m = model or default_model
     endpoint = f"{url}/api/chat"
+    provider = get_llm_provider()
 
     messages: List[Dict[str, Any]] = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    payload = {
-        "model": model_name,
-        "messages": messages,
-        "stream": False,
-        "keep_alive": -1,
-        "options": {"num_predict": 600},
-    }
+    # Format messages for the provider (text-only, so no image handling needed here)
+    formatted_messages = [_format_message_for_provider(msg, provider) for msg in messages]
+
+    payload = {"model": m, "messages": formatted_messages, "stream": False, "keep_alive": -1, "options": {"num_predict": 600}}
 
     try:
-        response = requests.post(endpoint, json=payload, timeout=timeout)
-        response.raise_for_status()
-        return (response.json().get("message", {}).get("content") or "").strip()
+        resp = requests.post(endpoint, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        return (resp.json().get("message", {}).get("content") or "").strip()
     except requests.exceptions.ConnectionError:
         if ensure_ollama_running():
             try:
-                response = requests.post(endpoint, json=payload, timeout=timeout)
-                response.raise_for_status()
-                return (response.json().get("message", {}).get("content") or "").strip()
+                resp = requests.post(endpoint, json=payload, timeout=timeout)
+                resp.raise_for_status()
+                return (resp.json().get("message", {}).get("content") or "").strip()
             except Exception:
                 pass
         raise RuntimeError(
@@ -353,6 +388,7 @@ def call_llm_text(
         )
     except Exception as e:
         raise RuntimeError(f"LLM text call failed: {e}")
+
 
 def _stream_openai(
     messages: List[Dict[str, Any]],
@@ -377,17 +413,16 @@ def _stream_openai(
         payload["tool_choice"] = "auto"
 
     try:
-        with requests.post(endpoint, json=payload, timeout=timeout, stream=True) as response:
-            response.raise_for_status()
+        with requests.post(endpoint, json=payload, timeout=timeout, stream=True) as resp:
+            resp.raise_for_status()
             full_content = ""
             buffer = ""
             # Tool call fragments: index -> {"id", "function": {"name", "arguments"}}
             tc_fragments: Dict[int, Dict[str, Any]] = {}
 
-            for raw in response.iter_lines():
+            for raw in resp.iter_lines():
                 if not raw:
                     continue
-                # SSE lines look like: b"data: {...}" or b"data: [DONE]"
                 line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
                 if not line.startswith("data:"):
                     continue
@@ -406,13 +441,13 @@ def _stream_openai(
                 full_content += text
                 buffer += text
 
-                # Yield complete sentences as they arrive
+                # Yield complete sentences as they accumulate
                 while True:
-                    match = _SENT_END.search(buffer)
-                    if not match:
+                    m = _SENT_END.search(buffer)
+                    if not m:
                         break
-                    sentence = buffer[: match.start() + 1].strip()
-                    buffer = buffer[match.end() :]
+                    sentence = buffer[: m.start() + 1].strip()
+                    buffer = buffer[m.end():]
                     if sentence:
                         yield {"type": "sentence", "text": sentence}
 
@@ -422,20 +457,25 @@ def _stream_openai(
                     if idx not in tc_fragments:
                         tc_fragments[idx] = {"id": "", "function": {"name": "", "arguments": ""}}
                     frag = tc_fragments[idx]
-                    frag["id"] = frag["id"] or tc.get("id", "")
-                    func = tc.get("function", {})
-                    frag["function"]["name"] += func.get("name") or ""
-                    frag["function"]["arguments"] += func.get("arguments") or ""
+                    fid = tc.get("id", "")
+                    if fid:
+                        fid = fid
+                    else:
+                        fid = ""
+                    frag["id"] = fid
+                    fn = tc.get("function", {})
+                    frag["function"]["name"] += fn.get("name") or ""
+                    frag["function"]["arguments"] += fn.get("arguments") or ""
 
-                finish_reason = choice.get("finish_reason")
-                if finish_reason in ("stop", "tool_calls", "length"):
+                finish = choice.get("finish_reason")
+                if finish in ("stop", "tool_calls", "length"):
                     break
 
-            # Flush any remaining content
+            # Flush any trailing content
             if buffer.strip():
                 yield {"type": "sentence", "text": buffer.strip()}
 
-            # Parse accumulated tool-call arguments
+            # Parse accumulated tool-call argument strings -> dicts
             tool_calls: List[Dict[str, Any]] = []
             for idx in sorted(tc_fragments):
                 frag = tc_fragments[idx]
@@ -443,14 +483,10 @@ def _stream_openai(
                 try:
                     args = json.loads(args)
                 except Exception:
-                    pass  # Keep as raw string if not valid JSON
-
+                    pass   # leave as raw string; _execute_tool handles it
                 tool_calls.append({
                     "id": frag["id"],
-                    "function": {
-                        "name": frag["function"]["name"],
-                        "arguments": args,
-                    },
+                    "function": {"name": frag["function"]["name"], "arguments": args},
                 })
 
             yield {
@@ -461,66 +497,16 @@ def _stream_openai(
 
     except requests.exceptions.ConnectionError:
         raise RuntimeError(
-            f"Cannot reach OpenAI-compatible server at {url}.\n"
+            f"Cannot reach OpenAI-compatible server at {url}. "
             "Make sure LM Studio / LocalAI / Jan is running and the server is started."
         )
     except requests.exceptions.Timeout:
-        raise RuntimeError("OpenAI-compatible stream timed out.")
+        raise RuntimeError("OpenAline-compatible stream timed out.")
     except requests.exceptions.HTTPError as e:
-        raise RuntimeError(f"OpenAI-compatible HTTP error: {e.response.status_code}")
+        raise RuntimeError(f"OpenAline-compatible HTTP error: {e.response.status_code}")
     except Exception as e:
-        raise RuntimeError(f"OpenAI-compatible stream failed: {e}")
+        raise RuntimeError(f"OpenAline-compatible stream failed: {e}")
 
-def _do_ollama_stream(
-    url: str,
-    payload: Dict[str, Any],
-) -> Generator[Dict[str, Any], None, None]:
-    """Helper function to handle Ollama streaming."""
-    with requests.post(f"{url}/api/chat", json=payload, stream=True) as response:
-        response.raise_for_status()
-        full_content = ""
-        buffer = ""
-        tool_calls: List[Dict[str, Any]] = []
-
-        for raw in response.iter_lines():
-            if not raw:
-                continue
-            try:
-                chunk = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-
-            message = chunk.get("message", {})
-            delta_content = message.get("content") or ""
-
-            full_content += delta_content
-            buffer += delta_content
-
-            # Yield complete sentences as they arrive
-            while True:
-                match = _SENT_END.search(buffer)
-                if not match:
-                    break
-                sentence = buffer[: match.start() + 1].strip()
-                buffer = buffer[match.end() :]
-                if sentence:
-                    yield {"type": "sentence", "text": sentence}
-
-            # Collect tool calls
-            tc = message.get("tool_calls")
-            if tc:
-                tool_calls.extend(tc)
-
-            if chunk.get("done"):
-                if buffer.strip():
-                    yield {"type": "sentence", "text": buffer.strip()}
-
-                yield {
-                    "type": "done",
-                    "content": full_content.strip(),
-                    "tool_calls": tool_calls,
-                }
-                return
 
 def call_llm_stream(
     messages: List[Dict[str, Any]],
@@ -529,27 +515,24 @@ def call_llm_stream(
 ) -> Generator[Dict[str, Any], None, None]:
     """
     Streaming chat request. Routes to Ollama or OpenAI-compatible backend.
-
-    Args:
-        messages: List of message dictionaries
-        tools: Optional list of tool definitions
-        timeout: Request timeout in seconds
-
     Yields:
-        {"type": "sentence", "text": str} - each complete sentence as it arrives
-        {"type": "done", "content": str, "tool_calls": list} - when stream ends
+        {"type": "sentence", "text": str}   — each complete sentence as it arrives
+        {"type": "done", "content": str, "tool_calls": list}  — when stream ends
+    Note: Image input is not supported in streaming mode for simplicity.
+          For vision tasks, use the non-blocking call_llm instead.
     """
     provider = get_llm_provider()
     if provider == "openai":
-        yield from _stream_openai(messages, tools, timeout)
+        yield from _stream_openai(messages, tokens, timeout)
         return
 
+    # Ollama streaming
     url, model = get_llm_settings()
     endpoint = f"{url}/api/chat"
 
     payload: Dict[str, Any] = {
         "model": model,
-        "messages": messages,
+        "messages": messages,  # Note: we do not format messages for images here because streaming with images is complex and not required for now.
         "stream": True,
         "keep_alive": -1,
         "options": {"num_predict": 150, "num_gpu": 99},
@@ -558,46 +541,67 @@ def call_llm_stream(
         payload["tools"] = tools
 
     def _do_stream() -> Generator[Dict[str, Any], None, None]:
-        try:
-            yield from _do_ollama_stream(url, payload)
-        except requests.exceptions.ConnectionError as e:
-            print(f"[LLM] Stream ConnectionError — trying to restart Ollama… ({e})")
-            if ensure_ollama_running():
-                yield from _do_ollama_stream(url, payload)
-                return
-            raise RuntimeError(
-                f"Cannot connect to Ollama at {url}. "
-                "Make sure Ollama is installed and run: ollama serve"
-            )
-        except requests.exceptions.Timeout:
-            raise RuntimeError("Ollama stream timed out.")
-        except requests.exceptions.HTTPError as e:
-            raise RuntimeError(f"Ollama HTTP error: {e.response.status_code}")
-        except Exception as e:
-            print(f"[LLM] Stream error: {type(e).__name__}: {e}")
-            raise RuntimeError(f"LLM stream failed: {e}")
+        with requests.post(endpoint, json=payload, timeout=timeout, stream=True) as resp:
+            resp.raise_for_status()
+            full_content = ""
+            tool_cats: List[Dict[str, Any]] = []
+            buffer = ""
 
-    yield from _do_stream()
+            for raw in resp.iter_lines():
+                if not raw:
+                    continue
+                try:
+                    chunk = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
 
+                msg = chunk.get("message", {})
+                delta = msg.get("content") or ""
 
-# Compatibility functions for existing main.py code
-def ollama_generate(prompt: str) -> str:
-    """Generate text using Ollama (non-streaming) - compatibility function."""
-    return call_llm_text(prompt)
+                full_content += delta
+                buffer += delta
 
+                # Yield complete sentences as they accumulate
+                while True:
+                    m = _SENT_END.search(buffer)
+                    if not m:
+                        break
+                    sentence = buffer[: m.start() + 1].strip()
+                    buffer = buffer[m.end():]
+                    if sentence:
+                        yield {"type": "sentence", "text": sentence}
 
-def get_ollama_model() -> str:
-    """Get the default Ollama model - compatibility function."""
-    return get_ollama_settings()[1]
+                tc = msg.get("tool_calls") or []
+                if tc:
+                    for t in tc:
+                        tool_cats.append(t)
 
+                if chunk.get("done"):
+                    if buffer.strip():
+                        yield {"type": "sentence", "text": buffer.strip()}
 
-def get_ollama_models() -> list:
-    """Get list of available Ollama models - compatibility function."""
+                    yield {
+                        "type": "done",
+                        "content": full_content.strip(),
+                        "tool_calls": tool_cats,
+                    }
+                    return
+
     try:
-        response = requests.get(f"{get_llm_settings()[0]}/api/tags", timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            return [m["name"] for m in data.get("models", [])]
-    except Exception:
-        pass
-    return ["llama2"]  # fallback
+        yield from _do_stream()
+    except requests.exceptions.ConnectionError as e:
+        print(f"[LLM] Stream ConnectionError — trying to restart Ollama… ({e})")
+        if ensure_ollama_running():
+            yield from _do_stream()
+            return
+        raise RuntimeError(
+            f"Cannot connect to Ollama at {url}. "
+            "Make sure Ollama is installed and run: ollama serve"
+        )
+    except requests.exceptions.Timeout:
+        raise RuntimeError("Ollama stream timed out.")
+    except requests.exceptions.HTTPError as e:
+        raise RuntimeError(f"Ollama HTTP error: {e.response.status_code}")
+    except Exception as e:
+        print(f"[LLM] Stream error: {type(e).__name__}: {e}")
+        raise RuntimeError(f"LLM stream failed: {e}")

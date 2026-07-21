@@ -1,0 +1,309 @@
+@import url('design-tokens.css');
+
+/* Reset & base */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+html, body {
+  height: 100%;
+  font-family: var(--font-body);
+  background-color: var(--bg-page);
+  color: var(--text-primary);
+}
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Utility */
+.hidden { display: none !important; }
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0);
+  white-space: nowrap; border: 0;
+}
+
+/* Layout containers */
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+.status-bar, .input-bar {
+  display: flex;
+  align-items: center;
+  padding: var(--unit-half) var(--unit);
+  background-color: var(--bg-panel);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.status-bar {
+  justify-content: space-between;
+  gap: var(--unit);
+}
+.input-bar {
+  justify-content: space-between;
+  gap: var(--unit);
+}
+
+/* Status bar elements */
+.icon-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1.2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-base);
+  transition: background-color .2s, color .2s;
+}
+.icon-btn:hover,
+.icon-btn:focus-visible {
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+  outline: 2px solid var(--accent-primary);
+}
+.mic-icon, .speaker-icon, .voice-icon, .send-icon {
+  width: 1.4rem;
+  height: 1.4rem;
+  fill: currentColor;
+}
+.waveform-ring {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 2rem;
+  height: 2rem;
+  border: 2px solid var(--accent-primary);
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity .2s;
+}
+#mic-toggle.active .waveform-ring {
+  opacity: 0.2;
+}
+.status-label {
+  font-family: var(--font-display);
+  font-size: 0.9rem;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.volume-meter {
+  flex: 1;
+  height: 4px;
+  background: var(--bg-input);
+  margin: 0 var(--unit);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.volume-meter::after {
+  content: "";
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--accent-primary);
+  transition: width .1s linear;
+}
+.clock {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+/* Main conversation */
+.conversation {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: var(--unit);
+  gap: var(--unit);
+  overflow-y: auto;
+}
+.pulse-waveform {
+  width: 100%;
+  height: 4px;
+  display: block;
+}
+.chat-log {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--unit);
+}
+.message {
+  max-width: 80%;
+  padding: var(--unit) calc(var(--unit) * 1.5);
+  border-radius: var(--radius-base);
+  line-height: 1.4;
+  word-wrap: break-word;
+}
+.message.user {
+  align-self: flex-end;
+  background: var(--accent-primary);
+  color: #000;
+}
+.message.assistant {
+  align-self: flex-start;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+}
+
+/* Sidebar */
+.sidebar {
+  width: 280px;
+  border-left: 1px solid var(--border-subtle);
+  background-color: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+}
+.tab-bar {
+  display: flex;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: var(--unit-half) 0;
+}
+.tab-btn {
+  flex: 1;
+  padding: var(--unit);
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  cursor: pointer;
+  position: relative;
+}
+.tab-btn.active {
+  color: var(--text-primary);
+  border-bottom: 2px solid var(--accent-primary);
+}
+.tab-btn:hover,
+.tab-btn:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+}
+.tab-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--unit);
+  display: none;
+}
+.tab-panel.active {
+  display: block;
+}
+.search-box {
+  width: 100%;
+  padding: var(--unit-half) var(--unit);
+  margin-bottom: var(--unit);
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-input);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+}
+.memory-list {
+  list-style: none;
+}
+.memory-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--unit-half) 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.9rem;
+}
+.memory-item .value {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+.memory-item .delete-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.memory-item .delete-btn:hover {
+  color: var(--accent-primary);
+}
+.sensor-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--unit-half) 0;
+  font-size: 0.9rem;
+}
+.sensor-label {
+  flex: 1;
+}
+.sensor-indicator {
+  font-size: 1.2rem;
+  color: var(--text-muted);
+}
+.sensor-indicator.active {
+  color: var(--accent-primary);
+}
+.action-log {
+  list-style: none;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.action-log li {
+  padding: var(--unit-half) 0;
+  border-bottom: 1px dashed var(--border-subtle);
+}
+
+/* Input bar */
+.input-field {
+  flex: 1;
+  padding: var(--unit) var(--unit);
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-input);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+}
+.input-field:focus {
+  outline: 2px solid var(--accent-primary);
+  border-color: transparent;
+}
+
+/* Animations for reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Pulse wobble animation */
+@keyframes pulse-wobble {
+  0% { transform: scale(1) rotate(0deg); }
+  25% { transform: scale(1.04) rotate(-2deg); }
+  50% { transform: scale(1.08) rotate(2deg); }
+  75% { transform: scale(1.04) rotate(-2deg); }
+  100% { transform: scale(1) rotate(0deg); }
+}
+
+.memory-map {
+  display: block;
+  margin: 1.5rem auto;
+  width: 180px;
+  height: 40px;
+}
+
+#memory-map.thinking {
+  animation: pulse-wobble 4s ease-in-out infinite;
+}
+
+#memory-map.speaking {
+  animation: pulse-wobble 0.5s ease-in-out infinite;
+}
